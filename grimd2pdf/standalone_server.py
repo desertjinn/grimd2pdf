@@ -34,7 +34,22 @@ from mcp.types import (
     JSONRPCResponse,
 )
 
-from .server import convert_markdown_to_pdf, convert_markdown_file_to_pdf, health_check
+# Handle both relative and absolute imports for PyInstaller compatibility
+try:
+    from .server import convert_markdown_to_pdf, convert_markdown_file_to_pdf, health_check
+except ImportError:
+    # Fallback for when running as standalone script or PyInstaller binary
+    try:
+        from grimd2pdf.server import convert_markdown_to_pdf, convert_markdown_file_to_pdf, health_check
+    except ImportError:
+        # Last resort: try importing directly
+        import sys
+        import os
+        # Add the parent directory to the path
+        parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
+        from grimd2pdf.server import convert_markdown_to_pdf, convert_markdown_file_to_pdf, health_check
 
 
 # Configure logging
