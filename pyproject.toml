@@ -3,7 +3,7 @@ name = "grimd2pdf"
 version = "0.1.0"
 description = "Grimd2pdf - A mystical Model Context Protocol server for converting markdown files to PDF"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "mcp[cli]>=1.9.4",
     "markdown-pdf>=0.1.0",
@@ -37,7 +37,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py310"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
