@@ -1,0 +1,46 @@
+[project]
+name = "grimd2pdf"
+version = "0.1.0"
+description = "Grimd2pdf - A mystical Model Context Protocol server for converting markdown files to PDF"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "mcp[cli]>=1.9.4",
+    "markdown-pdf>=0.1.0",
+    "python-multipart>=0.0.6",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "pydantic>=2.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["grimd2pdf*"]
+exclude = ["grimd2pdf*"]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.4",
+    "httpx>=0.27",
+]
+build = [
+    "pyinstaller>=6.0.0",
+    "setuptools>=61.0",
+]
+
+[project.scripts]
+grimd2pdf = "grimd2pdf.server:main"
+grimd2pdf-server = "grimd2pdf.standalone_server:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"] 

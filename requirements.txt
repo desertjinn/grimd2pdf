@@ -1,0 +1,4 @@
+fastapi
+uvicorn
+markdown-pdf
+python-multipart 

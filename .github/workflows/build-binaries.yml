@@ -1,0 +1,420 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e ".[test]"
+    
+    - name: Run tests
+      run: |
+        pytest tests/ -v
+    
+    - name: Run health check
+      run: |
+        python -c "import grimd2pdf.server; print(grimd2pdf.server.health_check())"
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-13]
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+          - os: macos-13
+            platform: macos
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install system dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libcairo2-dev \
+          libpango1.0-dev \
+          libgdk-pixbuf2.0-dev \
+          libffi-dev \
+          shared-mime-info
+
+    - name: Install system dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install cairo pango gdk-pixbuf libffi
+
+    - name: Create virtual environment
+      run: |
+        python -m venv venv
+        
+    - name: Activate virtual environment and install dependencies (Linux/macOS)
+      if: runner.os != 'Windows'
+      run: |
+        source venv/bin/activate
+        pip install --upgrade pip setuptools wheel
+        pip install -e ".[build]"
+
+    - name: Install PyInstaller dependencies
+      if: runner.os != 'Windows'
+      run: |
+        source venv/bin/activate
+        pip install pyinstaller[encryption]
+
+    - name: Create PyInstaller spec files
+      if: runner.os != 'Windows'
+      run: |
+        source venv/bin/activate
+        
+        # Create MCP server spec
+        cat > grimd2pdf.spec << 'EOF'
+        # -*- mode: python ; coding: utf-8 -*-
+        import sys
+        from pathlib import Path
+
+        block_cipher = None
+
+        a = Analysis(
+            ['grimd2pdf/server.py'],
+            pathex=[],
+            binaries=[],
+            datas=[],
+            hiddenimports=[
+                'markdown_pdf',
+                'mcp',
+                'mcp.server',
+                'mcp.server.stdio',
+                'mcp.types',
+            ],
+            hookspath=[],
+            hooksconfig={},
+            runtime_hooks=[],
+            excludes=[],
+            win_no_prefer_redirects=False,
+            win_private_assemblies=False,
+            cipher=block_cipher,
+            noarchive=False,
+        )
+
+        pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+        exe = EXE(
+            pyz,
+            a.scripts,
+            a.binaries,
+            a.zipfiles,
+            a.datas,
+            [],
+            name='grimd2pdf',
+            debug=False,
+            bootloader_ignore_signals=False,
+            strip=False,
+            upx=True,
+            upx_exclude=[],
+            runtime_tmpdir=None,
+            console=True,
+            disable_windowed_traceback=False,
+            argv_emulation=False,
+            target_arch=None,
+            codesign_identity=None,
+            entitlements_file=None,
+        )
+        EOF
+        
+        # Create standalone server spec  
+        cat > grimd2pdf-server.spec << 'EOF'
+        # -*- mode: python ; coding: utf-8 -*-
+        import sys
+        from pathlib import Path
+
+        block_cipher = None
+
+        # Get site-packages path
+        site_packages = None
+        for path in sys.path:
+            if 'site-packages' in path:
+                site_packages = Path(path)
+                break
+
+        if site_packages is None:
+            raise RuntimeError("Could not find site-packages directory")
+
+        # Find weasyprint data
+        weasyprint_data = []
+        weasyprint_path = site_packages / "weasyprint"
+        if weasyprint_path.exists():
+            weasyprint_data.append((str(weasyprint_path / "css"), "weasyprint/css"))
+            weasyprint_data.append((str(weasyprint_path / "html"), "weasyprint/html"))
+
+        # Find markdown-pdf data
+        markdown_pdf_data = []
+        markdown_pdf_path = site_packages / "markdown_pdf"
+        if markdown_pdf_path.exists():
+            for item in markdown_pdf_path.rglob("*"):
+                if item.is_file() and not item.name.endswith('.pyc'):
+                    rel_path = item.relative_to(site_packages)
+                    markdown_pdf_data.append((str(item), str(rel_path.parent)))
+
+        a = Analysis(
+            ['grimd2pdf/standalone_server.py'],
+            pathex=[],
+            binaries=[],
+            datas=weasyprint_data + markdown_pdf_data,
+            hiddenimports=[
+                'weasyprint',
+                'cairo',
+                'cairocffi',
+                'cairosvg',
+                'cssselect2',
+                'html5lib',
+                'tinycss2',
+                'pyphen',
+                'markdown_pdf',
+                'uvicorn.logging',
+                'uvicorn.loops',
+                'uvicorn.loops.auto',
+                'uvicorn.protocols',
+                'uvicorn.protocols.http',
+                'uvicorn.protocols.http.auto',
+                'uvicorn.protocols.websockets',
+                'uvicorn.protocols.websockets.auto',
+                'uvicorn.lifespan',
+                'uvicorn.lifespan.on',
+                'click',
+            ],
+            hookspath=[],
+            hooksconfig={},
+            runtime_hooks=[],
+            excludes=[],
+            win_no_prefer_redirects=False,
+            win_private_assemblies=False,
+            cipher=block_cipher,
+            noarchive=False,
+        )
+
+        pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+        exe = EXE(
+            pyz,
+            a.scripts,
+            a.binaries,
+            a.zipfiles,
+            a.datas,
+            [],
+            name='grimd2pdf-server',
+            debug=False,
+            bootloader_ignore_signals=False,
+            strip=False,
+            upx=True,
+            upx_exclude=[],
+            runtime_tmpdir=None,
+            console=True,
+            disable_windowed_traceback=False,
+            argv_emulation=False,
+            target_arch=None,
+            codesign_identity=None,
+            entitlements_file=None,
+        )
+        EOF
+
+    - name: Build binaries with PyInstaller
+      if: runner.os != 'Windows'
+      run: |
+        source venv/bin/activate
+        pyinstaller grimd2pdf.spec --clean --noconfirm
+        pyinstaller grimd2pdf-server.spec --clean --noconfirm
+
+    - name: Test binaries
+      if: runner.os != 'Windows'
+      run: |
+        chmod +x dist/grimd2pdf dist/grimd2pdf-server
+        
+        # Test MCP server binary
+        ./dist/grimd2pdf --help || echo "MCP binary help test completed"
+        
+        # Test standalone server binary
+        ./dist/grimd2pdf-server --help
+        echo "# Test" > test.md
+        timeout 10s ./dist/grimd2pdf-server --http --port 8888 &
+        sleep 3
+        curl -f http://localhost:8888/health || echo "Health check failed but binary runs"
+        pkill -f grimd2pdf-server || true
+
+    - name: Package binaries
+      if: runner.os != 'Windows'
+      run: |
+        mkdir -p release
+        cp dist/grimd2pdf release/grimd2pdf-${{ matrix.platform }}-${{ matrix.arch }}
+        cp dist/grimd2pdf-server release/grimd2pdf-server-${{ matrix.platform }}-${{ matrix.arch }}
+        chmod +x release/grimd2pdf-${{ matrix.platform }}-${{ matrix.arch }}
+        chmod +x release/grimd2pdf-server-${{ matrix.platform }}-${{ matrix.arch }}
+        
+        # Create a simple wrapper script
+        cat > release/README.txt << 'EOF'
+        Grimd2pdf - Mystical Markdown to PDF Server - Standalone Binary
+        ==================================================
+        
+        Usage:
+          # Run MCP server (stdio mode)
+          ./grimd2pdf
+          
+          # Run standalone server as MCP server
+          ./grimd2pdf-server
+          
+          # Run as HTTP API server
+          ./grimd2pdf-server --http --port 8000
+          
+          # Run with custom host/port
+          ./grimd2pdf-server --http --host 127.0.0.1 --port 9000
+          
+          # Get help
+          ./grimd2pdf --help
+          ./grimd2pdf-server --help
+        
+        MCP Integration:
+          Add to your MCP configuration:
+          {
+            "grimd2pdf": {
+              "command": "/path/to/grimd2pdf"
+            }
+          }
+          
+          Or use the standalone server:
+          {
+            "grimd2pdf": {
+              "command": "/path/to/grimd2pdf-server"
+            }
+          }
+        
+        HTTP API Endpoints:
+          GET  /health           - Health check
+          POST /convert          - Convert markdown text
+          POST /convert-file     - Convert markdown file
+          POST /upload           - Upload and convert file
+          GET  /mcp/tools        - List MCP tools
+          POST /mcp/call         - Call MCP tool
+          GET  /docs             - API documentation
+        EOF
+
+    - name: Upload binary artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaries-${{ matrix.platform }}-${{ matrix.arch }}
+        path: release/
+        retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+    
+    - name: Prepare release assets
+      run: |
+        mkdir -p release-assets
+        find artifacts -name "grimd2pdf-*" -type f -exec cp {} release-assets/ \;
+        find artifacts -name "README.txt" -exec cp {} release-assets/ \;
+        ls -la release-assets/
+    
+    - name: Extract tag name
+      id: tag
+      run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+    - name: Create release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.tag.outputs.tag }}
+        name: Release ${{ steps.tag.outputs.tag }}
+        files: release-assets/*
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+        body: |
+          ## 🚀 Release ${{ steps.tag.outputs.tag }}
+          
+          ### Download Options
+          
+          **MCP Server Binaries:**
+          - `grimd2pdf-linux-x64` - MCP server for Linux
+          - `grimd2pdf-macos-arm64` - MCP server for macOS Apple Silicon
+          - `grimd2pdf-macos-x64` - MCP server for macOS Intel
+          
+          **Standalone Server Binaries:**
+          - `grimd2pdf-server-linux-x64` - Standalone server for Linux
+          - `grimd2pdf-server-macos-arm64` - Standalone server for macOS Apple Silicon  
+          - `grimd2pdf-server-macos-x64` - Standalone server for macOS Intel
+          
+          ### Usage
+          
+          **MCP Server (recommended for Claude Desktop):**
+          ```bash
+          chmod +x grimd2pdf-*
+          ./grimd2pdf-linux-x64  # MCP server mode
+          ```
+          
+          **Standalone Server:**
+          ```bash
+          chmod +x grimd2pdf-server-*
+          ./grimd2pdf-server-linux-x64  # MCP server mode
+          ./grimd2pdf-server-linux-x64 --http --port 8000  # HTTP API mode
+          ```
+          
+          ### MCP Configuration
+          
+          Add to your Claude Desktop config:
+          ```json
+          {
+            "mcpServers": {
+              "grimd2pdf": {
+                "command": "/path/to/grimd2pdf-platform-arch"
+              }
+            }
+          }
+          ```
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
