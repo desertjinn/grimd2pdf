@@ -10,7 +10,8 @@ import base64
 import logging
 import os
 import tempfile
-from typing import Dict, Any, Optional
+import re
+from typing import Dict, Any, Optional, List, Tuple
 from pathlib import Path
 
 from mcp.server import FastMCP
@@ -22,6 +23,197 @@ logger = logging.getLogger(__name__)
 
 # Initialize MCP server
 mcp = FastMCP("Grimd2pdf - Mystical Markdown to PDF Converter")
+
+
+def sanitize_markdown_content(content: str) -> Tuple[str, List[str]]:
+    """
+    Sanitize and fix common markdown formatting issues that cause PDF conversion errors.
+    
+    Args:
+        content: Raw markdown content
+        
+    Returns:
+        Tuple of (sanitized_content, list_of_warnings)
+    """
+    warnings = []
+    sanitized = content
+    
+    # Remove null bytes and control characters that can cause issues
+    sanitized = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', sanitized)
+    
+    # Fix common table formatting issues
+    lines = sanitized.split('\n')
+    fixed_lines = []
+    in_table = False
+    table_columns = 0
+    
+    for i, line in enumerate(lines):
+        stripped_line = line.strip()
+        
+        # Detect table rows
+        if '|' in stripped_line and stripped_line:
+            if not in_table:
+                in_table = True
+                table_columns = stripped_line.count('|') + 1
+                # Check if previous line should be a table header
+                if i > 0 and fixed_lines and not fixed_lines[-1].strip().startswith('|'):
+                    # Add table header separator if missing
+                    pipe_count = stripped_line.count('|')
+                    if pipe_count >= 1:  # At least one column
+                        separator = '|' + '---|' * (pipe_count if pipe_count >= 2 else 2)
+                        if not separator.endswith('|'):
+                            separator += '|'
+                        fixed_lines.append(separator)
+                        warnings.append(f"Added missing table header separator at line {i+1}")
+            
+            # Fix malformed table rows
+            if stripped_line.startswith('|') and not stripped_line.endswith('|'):
+                line = line.rstrip() + '|'
+                warnings.append(f"Fixed incomplete table row at line {i+1}")
+            elif not stripped_line.startswith('|') and stripped_line.endswith('|'):
+                line = '|' + line
+                warnings.append(f"Fixed incomplete table row at line {i+1}")
+            elif not stripped_line.startswith('|') and not stripped_line.endswith('|'):
+                # Line has pipes but isn't properly formatted as table row
+                line = '|' + line.rstrip() + '|'
+                warnings.append(f"Fixed incomplete table row at line {i+1}")
+                
+        elif in_table and stripped_line and '|' not in stripped_line:
+            # Check if this might be a continuation of table data without pipes
+            # Split by common delimiters to see if it looks like tabular data
+            potential_cells = None
+            
+            # Try different separators
+            for sep in ['\t', '  ', ' ']:  # Tab, double space, single space
+                if sep in stripped_line:
+                    potential_cells = [cell.strip() for cell in stripped_line.split(sep) if cell.strip()]
+                    break
+            
+            # If we found what looks like tabular data, convert it to table row
+            if potential_cells and len(potential_cells) >= 2:
+                line = '| ' + ' | '.join(potential_cells) + ' |'
+                warnings.append(f"Converted plain text to table row at line {i+1}")
+            else:
+                in_table = False
+        elif in_table and not stripped_line:
+            # Empty line - end of table
+            in_table = False
+        else:
+            in_table = False
+            
+        fixed_lines.append(line)
+    
+    sanitized = '\n'.join(fixed_lines)
+    
+    # Fix heading hierarchy issues
+    headings = re.findall(r'^(#{1,6})\s+(.+)$', sanitized, re.MULTILINE)
+    if headings:
+        # Check for heading level jumps that might cause hierarchy errors
+        prev_level = 0
+        heading_fixes = []
+        
+        for match in re.finditer(r'^(#{1,6})\s+(.+)$', sanitized, re.MULTILINE):
+            current_level = len(match.group(1))
+            if prev_level > 0 and current_level > prev_level + 1:
+                # Found a level jump (e.g., # to ###)
+                # Fix by reducing to appropriate level
+                proper_level = prev_level + 1
+                proper_heading = '#' * proper_level + ' ' + match.group(2)
+                heading_fixes.append((match.group(0), proper_heading))
+                warnings.append(f"Fixed heading hierarchy jump from level {prev_level} to {current_level}")
+                prev_level = proper_level
+            else:
+                prev_level = current_level
+        
+        # Apply heading fixes
+        for old_heading, new_heading in heading_fixes:
+            sanitized = sanitized.replace(old_heading, new_heading, 1)
+    
+    # Fix list formatting issues
+    sanitized = re.sub(r'^(\s*)-(\S)', r'\1- \2', sanitized, flags=re.MULTILINE)
+    sanitized = re.sub(r'^(\s*)\*(\S)', r'\1* \2', sanitized, flags=re.MULTILINE)
+    sanitized = re.sub(r'^(\s*)\d+\.(\S)', r'\1\g<0> \2', sanitized, flags=re.MULTILINE)
+    
+    # Fix code block formatting
+    sanitized = re.sub(r'^```(\w+)?\n\n', r'```\1\n', sanitized, flags=re.MULTILINE)
+    
+    # Remove excessive blank lines that can cause parsing issues
+    sanitized = re.sub(r'\n{4,}', '\n\n\n', sanitized)
+    
+    # Ensure content ends with a newline
+    if not sanitized.endswith('\n'):
+        sanitized += '\n'
+    
+    return sanitized, warnings
+
+
+def validate_markdown_structure(content: str) -> Tuple[bool, List[str]]:
+    """
+    Validate markdown structure and identify potential issues.
+    
+    Args:
+        content: Markdown content to validate
+        
+    Returns:
+        Tuple of (is_valid, list_of_errors)
+    """
+    errors = []
+    
+    # Check for empty content
+    if not content.strip():
+        errors.append("Content is empty")
+        return False, errors
+    
+    # Check for malformed tables
+    lines = content.split('\n')
+    in_table_context = False
+    
+    for i, line in enumerate(lines, 1):
+        stripped_line = line.strip()
+        
+        # Detect if we're in a table context
+        if '|' in stripped_line and stripped_line:
+            # Count pipes to ensure table consistency
+            pipe_count = stripped_line.count('|')
+            
+            # Only report as malformed if it looks like it's trying to be a table row
+            # but doesn't have enough separators
+            if pipe_count >= 1:  # Has at least one pipe, so might be table-related
+                if pipe_count < 2 and (stripped_line.startswith('|') or stripped_line.endswith('|')):
+                    # Looks like a malformed table row (starts or ends with pipe but not enough pipes)
+                    errors.append(f"Malformed table row at line {i}: insufficient column separators")
+                # If it has pipes but doesn't start/end with them, it might just be content with pipes
+                # We'll let the sanitization handle it
+            in_table_context = True
+        elif in_table_context and not stripped_line:
+            # Empty line after table context
+            in_table_context = False
+        elif in_table_context and stripped_line and '|' not in stripped_line:
+            # Non-table content after table context
+            in_table_context = False
+    
+    # Check for heading structure
+    headings = re.findall(r'^(#{1,6})\s+(.+)$', content, re.MULTILINE)
+    if not headings:
+        # No headings found - could be valid, just warn
+        pass
+    else:
+        # Check for extremely deep nesting that might cause issues
+        max_level = max(len(h[0]) for h in headings)
+        if max_level > 6:
+            errors.append(f"Heading level too deep: {max_level} (maximum is 6)")
+    
+    # Check for unclosed code blocks
+    code_blocks = content.count('```')
+    if code_blocks % 2 != 0:
+        errors.append("Unclosed code block detected")
+    
+    # Check for extremely long lines that might cause rendering issues
+    for i, line in enumerate(lines, 1):
+        if len(line) > 10000:  # Arbitrary but reasonable limit
+            errors.append(f"Extremely long line at {i}: {len(line)} characters")
+    
+    return len(errors) == 0, errors
 
 
 @mcp.tool()
@@ -77,14 +269,30 @@ def convert_markdown_to_pdf(
     logger.info(f"Converting markdown to PDF (base64={return_base64}, filename={output_filename})")
     
     try:
+        # Sanitize and validate markdown content
+        sanitized_content, sanitization_warnings = sanitize_markdown_content(markdown_content)
+        is_valid, validation_errors = validate_markdown_structure(sanitized_content)
+        
+        if not is_valid:
+            logger.warning(f"Markdown validation failed: {validation_errors}")
+            return {
+                "success": False,
+                "error": f"Invalid markdown structure: {'; '.join(validation_errors)}",
+                "message": "The provided markdown content has structural issues that prevent PDF conversion",
+                "validation_errors": validation_errors,
+                "sanitization_warnings": sanitization_warnings
+            }
+        
+        if sanitization_warnings:
+            logger.info(f"Applied markdown sanitization fixes: {sanitization_warnings}")
+        
         # Create a PDF from the markdown content
-        # Note: markdown-pdf library doesn't support custom page options directly
-        # The options are stored for future use or different PDF libraries
         try:
+            logger.debug("Creating MarkdownPdf object")
             pdf = MarkdownPdf(toc_level=6, mode='commonmark', optimize=True)
             
             # Create section with custom CSS for margins and page size if needed
-            section_content = markdown_content
+            section_content = sanitized_content
             if page_size != "A4" or any(margin != "1in" for margin in [margin_top, margin_right, margin_bottom, margin_left]):
                 # Add CSS styling for custom page settings
                 css_style = f"""
@@ -100,10 +308,32 @@ def convert_markdown_to_pdf(
                 """
                 section_content = css_style + "\n\n" + section_content
             
+            logger.debug("Adding section to PDF")
             pdf.add_section(Section(section_content))
+            
         except Exception as pdf_error:
             logger.error(f"Failed to create PDF object: {str(pdf_error)}")
-            raise pdf_error
+            
+            # Check for specific error patterns and provide better error messages
+            error_str = str(pdf_error).lower()
+            if "hierarchy" in error_str:
+                return {
+                    "success": False,
+                    "error": f"Markdown hierarchy error: {str(pdf_error)}",
+                    "message": "The markdown content has heading or structure issues. Try using simpler heading levels or check table formatting.",
+                    "suggested_fix": "Ensure headings progress logically (# then ## then ###) and tables have proper formatting with | separators",
+                    "sanitization_warnings": sanitization_warnings
+                }
+            elif "table" in error_str or "row" in error_str:
+                return {
+                    "success": False,
+                    "error": f"Markdown table error: {str(pdf_error)}",
+                    "message": "The markdown content has table formatting issues.",
+                    "suggested_fix": "Check that all table rows have the same number of columns and proper | separators",
+                    "sanitization_warnings": sanitization_warnings
+                }
+            else:
+                raise pdf_error
 
         # Generate filename if not provided
         if not output_filename:
@@ -116,6 +346,7 @@ def convert_markdown_to_pdf(
         if return_base64:
             # Save to temporary file and return as base64
             with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_pdf:
+                logger.debug(f"Saving PDF to temporary file: {temp_pdf.name}")
                 pdf.save(temp_pdf.name)
                 
                 # Read the PDF file and encode as base64
@@ -127,7 +358,7 @@ def convert_markdown_to_pdf(
                 os.unlink(temp_pdf.name)
                 
                 logger.info(f"Successfully converted markdown to PDF (base64), size: {len(pdf_bytes)} bytes")
-                return {
+                result = {
                     "success": True,
                     "filename": output_filename,
                     "pdf_base64": pdf_base64,
@@ -141,14 +372,21 @@ def convert_markdown_to_pdf(
                     },
                     "message": f"Successfully converted markdown to PDF: {output_filename}"
                 }
+                
+                if sanitization_warnings:
+                    result["sanitization_warnings"] = sanitization_warnings
+                    result["message"] += f" (Applied {len(sanitization_warnings)} formatting fixes)"
+                
+                return result
         else:
             # Save to current directory
             output_path = Path(output_filename)
+            logger.debug(f"Saving PDF to file: {output_path}")
             pdf.save(str(output_path))
             
             file_size = output_path.stat().st_size
             logger.info(f"Successfully converted markdown to PDF file: {output_path}, size: {file_size} bytes")
-            return {
+            result = {
                 "success": True,
                 "filename": output_filename,
                 "output_path": str(output_path.absolute()),
@@ -163,14 +401,43 @@ def convert_markdown_to_pdf(
                 "message": f"Successfully converted markdown to PDF: {output_filename}"
             }
             
+            if sanitization_warnings:
+                result["sanitization_warnings"] = sanitization_warnings
+                result["message"] += f" (Applied {len(sanitization_warnings)} formatting fixes)"
+            
+            return result
+            
     except Exception as e:
         logger.error(f"Failed to convert markdown to PDF: {str(e)}", exc_info=True)
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "message": f"Failed to convert markdown to PDF: {str(e)}"
-        }
+        
+        # Provide specific error information based on the error type
+        error_str = str(e).lower()
+        if "hierarchy" in error_str or "bad hierarchy level" in error_str:
+            return {
+                "success": False,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "message": "PDF conversion failed due to markdown hierarchy issues. This often happens with malformed tables or incorrect heading levels.",
+                "suggested_fixes": [
+                    "Check table formatting: ensure all rows have the same number of columns",
+                    "Verify heading hierarchy: use # then ## then ### progression",
+                    "Remove any special characters or malformed content",
+                    "Ensure tables have proper header separators (---|---|---)"
+                ],
+                "common_causes": [
+                    "LLM-generated content with inconsistent table formatting",
+                    "Missing table header separators",
+                    "Heading level jumps (e.g., # directly to ###)",
+                    "Malformed table rows with inconsistent column counts"
+                ]
+            }
+        else:
+            return {
+                "success": False,
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "message": f"Failed to convert markdown to PDF: {str(e)}"
+            }
 
 
 @mcp.tool()
