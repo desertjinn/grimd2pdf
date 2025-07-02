@@ -382,24 +382,48 @@ def convert_markdown_to_pdf(
             # Save to current directory
             output_path = Path(output_filename)
             logger.debug(f"Saving PDF to file: {output_path}")
-            pdf.save(str(output_path))
-            
-            file_size = output_path.stat().st_size
-            logger.info(f"Successfully converted markdown to PDF file: {output_path}, size: {file_size} bytes")
-            result = {
-                "success": True,
-                "filename": output_filename,
-                "output_path": str(output_path.absolute()),
-                "size_bytes": file_size,
-                "page_size": page_size,
-                "margins": {
-                    "top": margin_top,
-                    "right": margin_right,
-                    "bottom": margin_bottom,
-                    "left": margin_left
-                },
-                "message": f"Successfully converted markdown to PDF: {output_filename}"
-            }
+            try:
+                pdf.save(str(output_path))
+                file_size = output_path.stat().st_size
+                logger.info(f"Successfully converted markdown to PDF file: {output_path}, size: {file_size} bytes")
+                result = {
+                    "success": True,
+                    "filename": output_filename,
+                    "output_path": str(output_path.absolute()),
+                    "size_bytes": file_size,
+                    "page_size": page_size,
+                    "margins": {
+                        "top": margin_top,
+                        "right": margin_right,
+                        "bottom": margin_bottom,
+                        "left": margin_left
+                    },
+                    "message": f"Successfully converted markdown to PDF: {output_filename}"
+                }
+            except PermissionError as perm_err:
+                # Fallback: return base64 instead of writing to disk
+                logger.warning(f"Permission error while saving PDF: {perm_err}. Falling back to base64 response.")
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as temp_pdf:
+                    pdf.save(temp_pdf.name)
+                    with open(temp_pdf.name, 'rb') as pdf_file:
+                        pdf_bytes = pdf_file.read()
+                        pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
+                    os.unlink(temp_pdf.name)
+                result = {
+                    "success": True,
+                    "filename": output_filename,
+                    "pdf_base64": pdf_base64,
+                    "size_bytes": len(pdf_bytes),
+                    "page_size": page_size,
+                    "margins": {
+                        "top": margin_top,
+                        "right": margin_right,
+                        "bottom": margin_bottom,
+                        "left": margin_left
+                    },
+                    "fallback_to_base64": True,
+                    "message": "File-system permissions prevented writing PDF to disk; returned base64 instead"
+                }
             
             if sanitization_warnings:
                 result["sanitization_warnings"] = sanitization_warnings

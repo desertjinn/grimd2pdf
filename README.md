@@ -355,3 +355,115 @@ For issues and questions:
 - Create an issue on GitHub
 - Review the troubleshooting section
 - Check the API documentation at `/docs` when running HTTP mode
+
+## 🤖 LLM Integration Guide
+
+This section is **purpose-built for Large-Language-Model (LLM) agents** (or any programmatic caller)
+that need to convert Markdown to PDF without direct human interaction.
+
+### 1. Available Tools (MCP Protocol)
+
+| Tool name | Description | Required arguments | Optional arguments |
+|-----------|-------------|--------------------|--------------------|
+| `convert_markdown_to_pdf` | Convert a Markdown string directly to PDF | `markdown_content` (string) | `output_filename` (string, *no `.pdf`*), `return_base64` (bool, default **false**) |
+| `convert_markdown_file_to_pdf` | Convert a Markdown file on disk | `markdown_file_path` (string) | `output_filename`, `return_base64` |
+| `health_check` | Check converter health | *(none)* | *(none)* |
+
+*All MCP tool calls return a JSON object with `success` (bool) and either the PDF details (see below)
+or an `error` field on failure.*
+
+#### Success response  
+When `return_base64=true` **or** when writing the file to disk fails due to file-system permissions:
+```json
+{
+  "success": true,
+  "filename": "mydoc.pdf",
+  "pdf_base64": "JVBERi0xLjQK...",
+  "size_bytes": 123456,
+  "fallback_to_base64": true,           // present only if a disk-write permission error occurred
+  "sanitization_warnings": [           // present only if markdown fixes were applied
+    "Added missing table header separator at line 12"
+  ],
+  "message": "Successfully converted markdown to PDF (Applied 1 formatting fix)"
+}
+```
+If the PDF **is** written to disk (`return_base64=false` **and** permissions permit):
+```json
+{
+  "success": true,
+  "filename": "mydoc.pdf",
+  "output_path": "/abs/path/mydoc.pdf",
+  "size_bytes": 123456,
+  "message": "Successfully converted markdown to PDF"
+}
+```
+
+### 2. HTTP API Endpoints (for non-MCP clients)
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| `POST` | `/convert` | Convert Markdown **text** → JSON (same schema as MCP) |
+| `POST` | `/convert-file` | Convert Markdown **file** → JSON |
+| `POST` | `/upload` | Upload & convert Markdown file (multipart/form-data) → JSON |
+| `POST` | `/convert-stream` | **Stream** raw `application/pdf` back (octet-stream) – *no server file write* |
+| `GET`  | `/download/{filename}` | Download a PDF that **was** written to disk |
+
+#### /convert-stream example
+```bash
+curl -X POST http://localhost:8000/convert-stream \
+     -H "Content-Type: application/json" \
+     -d '{
+           "markdown_content": "# Hello\nThis is a test.",
+           "output_filename": "hello"
+         }' \
+     --output hello.pdf
+```
+The server renders entirely in memory and streams the PDF with headers:
+```
+Content-Type: application/pdf
+Content-Disposition: attachment; filename=hello.pdf
+```
+
+### 3. File-System Permission Safety
+* If `return_base64=false` **and** the server cannot write to the current directory, it
+  automatically falls back to the Base-64 response shown above and sets
+  `"fallback_to_base64": true` in the JSON payload.  
+* LLMs therefore never need to probe the environment – simply request disk output
+  and be prepared for Base-64 fallback.
+
+### 4. Markdown Sanitisation
+Mal-formed Markdown (common with LLM output) is automatically cleaned.  
+Any fixes applied are listed in `sanitization_warnings`.  
+See **"Troubleshooting & Sanitisation"** earlier in this README for details.
+
+### 5. Minimal MCP JSON-RPC Example
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "call_tool",
+  "params": {
+    "name": "convert_markdown_to_pdf",
+    "arguments": {
+      "markdown_content": "# Title\nHello!",
+      "return_base64": true
+    }
+  }
+}
+```
+The response will be:
+```json
+{
+  "id": 1,
+  "result": [
+    {
+      "type": "text",
+      "text": "{\n  \"success\": true, ... }"
+    }
+  ]
+}
+```
+
+LLMs can now confidently convert Markdown to PDF in **any** execution environment – even
+read-only sandboxes – by leveraging the automatic Base-64 fallback or the new
+`/convert-stream` endpoint. 🪄

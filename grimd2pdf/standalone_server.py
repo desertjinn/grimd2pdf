@@ -17,7 +17,7 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -413,6 +413,38 @@ def create_http_app() -> FastAPI:
             filename=filename,
             media_type='application/pdf'
         )
+    
+    @app.post("/convert-stream")
+    async def convert_stream(request: ConvertMarkdownRequest):
+        """Convert markdown content to PDF and return as streamed octet-stream."""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            thread_pool,
+            convert_markdown_to_pdf,
+            request.markdown_content,
+            request.output_filename,
+            True  # always return_base64
+        )
+        if not result.get("success"):
+            return JSONResponse(status_code=400, content=result)
+        import base64, io
+        pdf_bytes = base64.b64decode(result["pdf_base64"])
+        filename = (request.output_filename or "converted_markdown") + ".pdf"
+        return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf", headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        })
+    
+    @app.get("/llm-guide", response_class=PlainTextResponse)
+    async def llm_guide():
+        """Return the LLM Integration Guide section of the README so agents can read it at runtime."""
+        readme_path = Path(__file__).parent.parent / "README.md"
+        if not readme_path.exists():
+            raise HTTPException(status_code=404, detail="README not found")
+        text = readme_path.read_text(encoding="utf-8")
+        marker = "## 🤖 LLM Integration Guide"
+        if marker in text:
+            return text.split(marker, 1)[1].lstrip()
+        return text  # fallback: return full README
     
     return app
 
